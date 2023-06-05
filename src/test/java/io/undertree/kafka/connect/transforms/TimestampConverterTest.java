@@ -1,16 +1,44 @@
-package com.github.howareyouo.kafka.connect.transforms;
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package io.undertree.kafka.connect.transforms;
 
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.data.Date;
-import org.apache.kafka.connect.data.*;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Time;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.*;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.GregorianCalendar;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.TimeZone;
 
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class TimestampConverterTest {
     private static final TimeZone UTC = TimeZone.getTimeZone("UTC");
@@ -175,6 +203,22 @@ public class TimestampConverterTest {
         assertEquals(DATE_PLUS_TIME.getTime(), transformed.value());
     }
 
+    @Test
+    public void testSchemalessStringToTimestamp_Mine() {
+        Map<String, String> config = new HashMap<>();
+        config.put(TimestampConverter.TARGET_TYPE_CONFIG, "Timestamp");
+        config.put(TimestampConverter.FORMAT_CONFIG, "yyyy-MM-dd'T'HH:mm:ss'Z'");
+        config.put(TimestampConverter.FORMAT_ALT_CONFIG, "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+        xformValue.configure(config);
+        SourceRecord transformed = xformValue.apply(createRecordSchemaless("2022-06-01T16:00:35.631Z"));
+
+        assertNull(transformed.valueSchema());
+
+        SourceRecord transformed2 = xformValue.apply(createRecordSchemaless("2022-06-01T16:00:35Z"));
+
+        assertEquals(transformed2.value(), transformed.value());
+    }
+
 
     // Conversions with schemas (most flexible Timestamp -> other types)
 
@@ -233,19 +277,16 @@ public class TimestampConverterTest {
         testSchemalessNullValueConversion("string");
         testSchemalessNullFieldConversion("string");
     }
-
     @Test
     public void testSchemalessNullValueToDate() {
         testSchemalessNullValueConversion("Date");
         testSchemalessNullFieldConversion("Date");
     }
-
     @Test
     public void testSchemalessNullValueToTimestamp() {
         testSchemalessNullValueConversion("Timestamp");
         testSchemalessNullFieldConversion("Timestamp");
     }
-
     @Test
     public void testSchemalessNullValueToUnix() {
         testSchemalessNullValueConversion("unix");
@@ -273,7 +314,7 @@ public class TimestampConverterTest {
         Map<String, String> config = new HashMap<>();
         config.put(TimestampConverter.TARGET_TYPE_CONFIG, targetType);
         config.put(TimestampConverter.FORMAT_CONFIG, STRING_DATE_FMT);
-        config.put(TimestampConverter.FIELDS_CONFIG, "ts");
+        config.put(TimestampConverter.FIELD_CONFIG, "ts");
         xformValue.configure(config);
         SourceRecord transformed = xformValue.apply(createRecordSchemaless(null));
 
@@ -431,7 +472,7 @@ public class TimestampConverterTest {
         Map<String, String> config = new HashMap<>();
         config.put(TimestampConverter.TARGET_TYPE_CONFIG, targetType);
         config.put(TimestampConverter.FORMAT_CONFIG, STRING_DATE_FMT);
-        config.put(TimestampConverter.FIELDS_CONFIG, "ts");
+        config.put(TimestampConverter.FIELD_CONFIG, "ts");
         xformValue.configure(config);
         SchemaBuilder structSchema = SchemaBuilder.struct()
                 .field("ts", originalSchema)
@@ -464,7 +505,7 @@ public class TimestampConverterTest {
     public void testSchemalessFieldConversion() {
         Map<String, String> config = new HashMap<>();
         config.put(TimestampConverter.TARGET_TYPE_CONFIG, "Date");
-        config.put(TimestampConverter.FIELDS_CONFIG, "ts");
+        config.put(TimestampConverter.FIELD_CONFIG, "ts");
         xformValue.configure(config);
 
         Object value = Collections.singletonMap("ts", DATE_PLUS_TIME.getTime());
@@ -478,7 +519,7 @@ public class TimestampConverterTest {
     public void testWithSchemaFieldConversion() {
         Map<String, String> config = new HashMap<>();
         config.put(TimestampConverter.TARGET_TYPE_CONFIG, "Timestamp");
-        config.put(TimestampConverter.FIELDS_CONFIG, "ts");
+        config.put(TimestampConverter.FIELD_CONFIG, "ts");
         xformValue.configure(config);
 
         // ts field is a unix timestamp

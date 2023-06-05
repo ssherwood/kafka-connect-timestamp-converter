@@ -2,6 +2,11 @@
 This is a rewrite of Apache Kafka® SMT `org.apache.kafka.connect.transforms.TimestampConverter`
 > Docs on Confluent: https://docs.confluent.io/platform/current/connect/transforms/timestampconverter.html
 
+Change to support a fallback converter that will strip milliseconds if provided.
+
+
+
+
 It change the property `field` to `fields` , allows us handle multiple fields at once.
 
 ## Usages

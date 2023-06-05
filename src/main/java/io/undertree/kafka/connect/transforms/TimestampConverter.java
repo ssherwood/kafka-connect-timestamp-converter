@@ -1,5 +1,3 @@
-package com.github.howareyouo.kafka.connect.transforms;
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements. See the NOTICE file distributed with
@@ -17,6 +15,9 @@ package com.github.howareyouo.kafka.connect.transforms;
  * limitations under the License.
  */
 
+package io.undertree.kafka.connect.transforms;
+
+import org.apache.commons.lang3.time.DateUtils;
 import org.apache.kafka.common.cache.Cache;
 import org.apache.kafka.common.cache.LRUCache;
 import org.apache.kafka.common.cache.SynchronizedCache;
@@ -35,16 +36,19 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.*;
-import java.util.stream.Collectors;
 
 import static org.apache.kafka.connect.transforms.util.Requirements.requireMap;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStructOrNull;
 
 public abstract class TimestampConverter<R extends ConnectRecord<R>> implements Transformation<R> {
 
-    public static final String OVERVIEW_DOC = "Convert timestamps between different formats such as Unix epoch, strings, and Connect Date/Timestamp types." + "Applies to individual fields or to the entire value." + "<p/>Use the concrete transformation type designed for the record key (<code>" + TimestampConverter.Key.class.getName() + "</code>) " + "or value (<code>" + TimestampConverter.Value.class.getName() + "</code>).";
+    public static final String OVERVIEW_DOC =
+            "Convert timestamps between different formats such as Unix epoch, strings, and Connect Date/Timestamp types."
+                    + "Applies to individual fields or to the entire value."
+                    + "<p/>Use the concrete transformation type designed for the record key (<code>" + TimestampConverter.Key.class.getName() + "</code>) "
+                    + "or value (<code>" + TimestampConverter.Value.class.getName() + "</code>).";
 
-    public static final String FIELDS_CONFIG = "fields";
+    public static final String FIELD_CONFIG = "field";
     private static final String FIELD_DEFAULT = "";
 
     public static final String TARGET_TYPE_CONFIG = "target.type";
@@ -52,7 +56,20 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     public static final String FORMAT_CONFIG = "format";
     private static final String FORMAT_DEFAULT = "";
 
-    public static final ConfigDef CONFIG_DEF = new ConfigDef().define(FIELDS_CONFIG, ConfigDef.Type.STRING, FIELD_DEFAULT, ConfigDef.Importance.HIGH, "The field containing the timestamp, or empty if the entire value is a timestamp").define(TARGET_TYPE_CONFIG, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH, "The desired timestamp representation: string, unix, Date, Time, or Timestamp").define(FORMAT_CONFIG, ConfigDef.Type.STRING, FORMAT_DEFAULT, ConfigDef.Importance.MEDIUM, "A SimpleDateFormat-compatible format for the timestamp. Used to generate the output when type=string " + "or used to parse the input if the input is a string.");
+    public static final String FORMAT_ALT_CONFIG = "format.alt";
+    private static final String FORMAT_ALT_DEFAULT = "";
+
+    public static final ConfigDef CONFIG_DEF = new ConfigDef()
+            .define(FIELD_CONFIG, ConfigDef.Type.STRING, FIELD_DEFAULT, ConfigDef.Importance.HIGH,
+                    "The field containing the timestamp, or empty if the entire value is a timestamp")
+            .define(TARGET_TYPE_CONFIG, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH,
+                    "The desired timestamp representation: string, unix, Date, Time, or Timestamp")
+            .define(FORMAT_CONFIG, ConfigDef.Type.STRING, FORMAT_DEFAULT, ConfigDef.Importance.MEDIUM,
+                    "A SimpleDateFormat-compatible format for the timestamp. Used to generate the output when type=string "
+                            + "or used to parse the input if the input is a string.")
+            .define(FORMAT_ALT_CONFIG, ConfigDef.Type.STRING, FORMAT_ALT_DEFAULT, ConfigDef.Importance.LOW,
+                    "An alternate SimpleDateFormat-compatible format for the timestamp.  This is applied if and only if "
+                            + "the original format string fails.");
 
     private static final String PURPOSE = "converting timestamp formats";
 
@@ -97,7 +114,18 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
                 try {
                     return config.format.parse((String) orig);
                 } catch (ParseException e) {
-                    throw new DataException("Could not parse timestamp: value (" + orig + ") does not match pattern (" + config.format.toPattern() + ")", e);
+                    if (config.formatAlt != null) {
+                        try {
+                            // This is a quick hack to see if I can also convert and strip millis from the date
+                            return DateUtils.truncate(config.formatAlt.parse((String) orig), Calendar.SECOND);
+                        } catch (ParseException e2) {
+                            throw new DataException("Could not parse timestamp: value (" + orig + ") does not match pattern ("
+                                    + config.format.toPattern() + ") nor (" + config.formatAlt.toPattern() + ")", e);
+                        }
+                    } else {
+                        throw new DataException("Could not parse timestamp: value (" + orig + ") does not match pattern ("
+                                + config.format.toPattern() + ")", e);
+                    }
                 }
             }
 
@@ -210,20 +238,18 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     // This is a bit unusual, but allows the transformation config to be passed to static anonymous classes to customize
     // their behavior
     private static class Config {
-        Config(String fields, String type, SimpleDateFormat format) {
-            this.format = format;
+        Config(String field, String type, SimpleDateFormat format, SimpleDateFormat formatAlt) {
+            this.field = field;
             this.type = type;
-
-            if (!isBlank(fields)) {
-                this.fields = Arrays.stream(fields.split(",")).map(String::trim).collect(Collectors.toSet());
-            }
+            this.format = format;
+            this.formatAlt = formatAlt;
         }
 
-        Set<String> fields = Collections.emptySet();
-        SimpleDateFormat format;
+        String field;
         String type;
+        SimpleDateFormat format;
+        SimpleDateFormat formatAlt;
     }
-
 
     private Config config;
     private Cache<Schema, Schema> schemaUpdateCache;
@@ -232,27 +258,41 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
     @Override
     public void configure(Map<String, ?> configs) {
         final SimpleConfig simpleConfig = new SimpleConfig(CONFIG_DEF, configs);
-        final String fields = simpleConfig.getString(FIELDS_CONFIG);
+        final String field = simpleConfig.getString(FIELD_CONFIG);
         final String type = simpleConfig.getString(TARGET_TYPE_CONFIG);
         String formatPattern = simpleConfig.getString(FORMAT_CONFIG);
+        String formatAltPattern = simpleConfig.getString(FORMAT_ALT_CONFIG);
         schemaUpdateCache = new SynchronizedCache<>(new LRUCache<>(16));
 
         if (!VALID_TYPES.contains(type)) {
-            throw new ConfigException("Unknown timestamp type in TimestampConverter: " + type + ". Valid values are " + Utils.join(VALID_TYPES, ", ") + ".");
+            throw new ConfigException("Unknown timestamp type in TimestampConverter: " + type + ". Valid values are "
+                    + Utils.join(VALID_TYPES, ", ") + ".");
         }
-        if (type.equals(TYPE_STRING) && isBlank(formatPattern)) {
+        if (type.equals(TYPE_STRING) && formatPattern.trim().isEmpty()) {
             throw new ConfigException("TimestampConverter requires format option to be specified when using string timestamps");
         }
         SimpleDateFormat format = null;
-        if (!isBlank(formatPattern)) {
+        if (formatPattern != null && !formatPattern.trim().isEmpty()) {
             try {
                 format = new SimpleDateFormat(formatPattern);
                 format.setTimeZone(UTC);
             } catch (IllegalArgumentException e) {
-                throw new ConfigException("TimestampConverter requires a SimpleDateFormat-compatible pattern for string timestamps: " + formatPattern, e);
+                throw new ConfigException("TimestampConverter requires a SimpleDateFormat-compatible pattern for string timestamps: "
+                        + formatPattern, e);
             }
         }
-        config = new Config(fields, type, format);
+        SimpleDateFormat altFormat = null;
+        if (formatAltPattern != null && !formatAltPattern.trim().isEmpty()) {
+            try {
+                altFormat = new SimpleDateFormat(formatAltPattern);
+                altFormat.setTimeZone(UTC);
+            } catch (IllegalArgumentException e) {
+                throw new ConfigException("TimestampConverter requires a SimpleDateFormat-compatible pattern for string timestamps: "
+                        + formatAltPattern, e);
+            }
+        }
+
+        config = new Config(field, type, format, altFormat);
     }
 
     @Override
@@ -315,7 +355,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
 
     private R applyWithSchema(R record) {
         final Schema schema = operatingSchema(record);
-        if (config.fields.isEmpty()) {
+        if (config.field.isEmpty()) {
             Object value = operatingValue(record);
             // New schema is determined by the requested target timestamp type
             Schema updatedSchema = TRANSLATORS.get(config.type).typeSchema(schema.isOptional());
@@ -325,15 +365,15 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
             Schema updatedSchema = schemaUpdateCache.get(schema);
             if (updatedSchema == null) {
                 SchemaBuilder builder = SchemaUtil.copySchemaBasics(schema, SchemaBuilder.struct());
-
                 for (Field field : schema.fields()) {
-                    if (config.fields.contains(field.name())) {
+                    if (field.name().equals(config.field)) {
                         builder.field(field.name(), TRANSLATORS.get(config.type).typeSchema(field.schema().isOptional()));
                     } else {
                         builder.field(field.name(), field.schema());
                     }
                 }
-                if (schema.isOptional()) builder.optional();
+                if (schema.isOptional())
+                    builder.optional();
                 if (schema.defaultValue() != null) {
                     Struct updatedDefaultValue = applyValueWithSchema((Struct) schema.defaultValue(), builder);
                     builder.defaultValue(updatedDefaultValue);
@@ -355,7 +395,7 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
         Struct updatedValue = new Struct(updatedSchema);
         for (Field field : value.schema().fields()) {
             final Object updatedFieldValue;
-            if (config.fields.contains(field.name())) {
+            if (field.name().equals(config.field)) {
                 updatedFieldValue = convertTimestamp(value.get(field), timestampTypeFromSchema(field.schema()));
             } else {
                 updatedFieldValue = value.get(field);
@@ -367,16 +407,12 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
 
     private R applySchemaless(R record) {
         Object rawValue = operatingValue(record);
-        if (rawValue == null || config.fields.isEmpty()) {
+        if (rawValue == null || config.field.isEmpty()) {
             return newRecord(record, null, convertTimestamp(rawValue));
         } else {
             final Map<String, Object> value = requireMap(rawValue, PURPOSE);
             final HashMap<String, Object> updatedValue = new HashMap<>(value);
-
-            // convert each fileds:
-            for (String field : config.fields) {
-                updatedValue.put(field, convertTimestamp(value.get(field)));
-            }
+            updatedValue.put(config.field, convertTimestamp(value.get(config.field)));
             return newRecord(record, null, updatedValue);
         }
     }
@@ -447,9 +483,5 @@ public abstract class TimestampConverter<R extends ConnectRecord<R>> implements 
 
     private Object convertTimestamp(Object timestamp) {
         return convertTimestamp(timestamp, null);
-    }
-
-    public static boolean isBlank(String str) {
-        return str == null || str.trim().isEmpty();
     }
 }
